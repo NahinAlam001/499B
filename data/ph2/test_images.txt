@@ -1,0 +1,2 @@
+datasets/PH2/PH2 Dataset images/PH2_simple_dataset.xlsx/PH2_simple_dataset.xlsx_Dermoscopic_Image/PH2_simple_dataset.xlsx.bmp
+datasets/PH2/PH2 Dataset images/README.md/README.md_Dermoscopic_Image/README.md.bmp

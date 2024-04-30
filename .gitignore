@@ -112,6 +112,8 @@ celerybeat.pid
 *.sage.py
 
 # Environments
+#data
+#datasets
 .env
 .venv
 env/
@@ -123,6 +125,7 @@ venv.bak/
 # Spyder project settings
 .spyderproject
 .spyproject
+.DS_Store
 
 # Rope project settings
 .ropeproject

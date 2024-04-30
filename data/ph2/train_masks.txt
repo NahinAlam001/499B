@@ -1,0 +1,3 @@
+datasets/PH2/PH2 Dataset images/images/images_lesion/images_lesion.bmp
+datasets/PH2/PH2 Dataset images/PH2_simple_dataset.csv/PH2_simple_dataset.csv_lesion/PH2_simple_dataset.csv_lesion.bmp
+datasets/PH2/PH2 Dataset images/PH2_dataset.txt/PH2_dataset.txt_lesion/PH2_dataset.txt_lesion.bmp
