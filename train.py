@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from model import UNet  # Assuming you have a UNet model defined in a file named model.py
+from model import UNet
 
 H, W = 256, 256
 
@@ -60,7 +60,7 @@ if __name__ == "__main__":
     num_epochs = 5
     model_path = "files/model.pth"
 
-    dataset_path = "/media/nikhil/ML/ml_dataset/isic-challenge-2018/"
+    dataset_path = "./isic-challenge-2018/"
     (train_x, train_y), (valid_x, valid_y), (test_x, test_y) = load_data(dataset_path)
 
     transform = transforms.ToTensor()
