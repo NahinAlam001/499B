@@ -60,7 +60,7 @@ if __name__ == "__main__":
     model.eval()
 
     """ Load the test data """
-    dataset_path = "/media/nikhil/ML/ml_dataset/isic-challenge-2018/"
+    dataset_path = "./isic-challenge-2018/"
     (train_x, train_y), (valid_x, valid_y), (test_x, test_y) = load_data(dataset_path)
 
     SCORE = []
