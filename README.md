@@ -26,7 +26,7 @@ This project contains scripts for loading and preprocessing data, training and e
    evaluate(my_skin_model, dataset, device)
 
 4. **FLOPs Calculation**
-  ```bash
-  from imports import my_skin_model, device
-  from flops_calculation import calculate_flops
-  calculate_flops(my_skin_model)
+     ```bash
+     from imports import my_skin_model, device
+     from flops_calculation import calculate_flops
+     calculate_flops(my_skin_model)
