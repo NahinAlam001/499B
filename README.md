@@ -143,7 +143,6 @@ Contributions are welcome! If you have suggestions for improvements, please crea
 
 ## License
 This project is licensed under the MIT License.
-```
 
 ### Instructions to Use
 
