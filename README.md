@@ -98,7 +98,7 @@ The directory structure after running the preprocessing script should look like 
 
 ## Contact
 
-For any questions or issues, please open an issue on the [GitHub repository](https://github.com/499B/SAM/issues).
+For any questions or issues, please open an issue on the [GitHub repository](https://github.com/NahinAlam001/499B/issues).
 
 ---
 
