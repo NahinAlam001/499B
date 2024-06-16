@@ -38,8 +38,8 @@ class SAMDataset(Dataset):
         return inputs
 
 def evaluate_model(model_path="skin_model_PH2_SAM_checkpoint.pth", batch_size=2):
-    image_dir = "/content/drive/MyDrive/Dataset/images"
-    mask_dir = "/content/drive/MyDrive/Dataset/masks"
+    image_dir = "./Dataset/images"
+    mask_dir = "./Dataset/masks"
     dataset = load_data(image_dir, mask_dir)
 
     processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
