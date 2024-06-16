@@ -1,6 +1,6 @@
 # SAM (Segment Anything Model) - Modular Code
 
-This repository contains a modular implementation of the Segment Anything Model (SAM) for segmenting images from the ISIC 2017 dataset. The implementation includes scripts for data preprocessing, training, and evaluation of the model.
+This repository contains a modular implementation of the Segment Anything Model (SAM) for segmenting images from the PH2 dataset. The implementation includes scripts for data preprocessing, training, and evaluation of the model.
 
 ## Table of Contents
 - [Installation](#installation)
@@ -15,8 +15,8 @@ Before using the scripts, you need to install the necessary dependencies. You ca
 
 1. Clone the repository:
     ```sh
-    git clone https://github.com/499B/SAM.git
-    cd sam-modular
+    git clone -b SAM https://github.com/NahinAlam001/499B.git
+    cd SAM
     ```
 
 2. Run the dependency installation script:
@@ -28,7 +28,7 @@ This will install all required packages including `monai`, `datasets`, `scikit-l
 
 ## Data Preprocessing
 
-The data preprocessing script mounts Google Drive, extracts the dataset, and organizes the image and ground truth files into appropriate directories.
+The data preprocessing script downloads the dataset, extracts the dataset, and organizes the image and ground truth files into appropriate directories.
 
 1. Run the preprocessing script:
     ```sh
@@ -36,14 +36,12 @@ The data preprocessing script mounts Google Drive, extracts the dataset, and org
     ```
 
 This script will:
-- Mount Google Drive.
-- Extract the ISIC 2017 dataset from a zip file.
-- Copy JPEG images to the `ISIC2017_Task1-2_Training_Input` directory.
-- Copy PNG ground truth files to the `ISIC2017_Task1-2_Training_GroundTruth` directory.
+- Download the dataset
+- Extract the PH2 dataset from a zip file.
 
 ## Training
 
-The training script trains the SAM model on the ISIC 2017 dataset and saves the trained model checkpoint.
+The training script trains the SAM model on the PH2 dataset and saves the trained model checkpoint.
 
 1. Run the training script:
     ```sh
@@ -53,11 +51,11 @@ The training script trains the SAM model on the ISIC 2017 dataset and saves the 
 This script will:
 - Load and preprocess the data.
 - Train the SAM model.
-- Save the model checkpoint to `skin_model_ISIC_2017_checkpoint.pth`.
+- Save the model checkpoint to `skin_model_PH2_SAM_checkpoint.pth`.
 
 ## Evaluation
 
-The evaluation script evaluates the trained SAM model on the ISIC 2017 dataset and calculates various performance metrics.
+The evaluation script evaluates the trained SAM model on the PH2 dataset and calculates various performance metrics.
 
 1. Run the evaluation script:
     ```sh
@@ -72,7 +70,6 @@ This script will:
   - Mean Accuracy
   - Mean Recall
   - Mean F1 Score
-  - Mean FLOPs
 
 ## Metrics
 
@@ -82,26 +79,16 @@ The evaluation script calculates and prints the following metrics:
 - **Mean Accuracy**: The ratio of correctly predicted pixels to total pixels.
 - **Mean Recall**: The ratio of correctly predicted positive pixels to all ground truth positive pixels.
 - **Mean F1 Score**: The harmonic mean of precision and recall.
-- **Mean FLOPs**: Floating point operations per second, a measure of computational complexity.
 
 ## Directory Structure
 
 The directory structure after running the preprocessing script should look like this:
 
 ```
-/content
-  ├── ISIC-2017_Training_Data
-  ├── ISIC-2017_Test_v2_Data
-  ├── ISIC-2017_Validation_Data
-  ├── ISIC-2017_Training_Part1_GroundTruth
-  ├── ISIC-2017_Training_Part2_GroundTruth
-  ├── ISIC-2017_Test_v2_Part1_GroundTruth
-  ├── ISIC-2017_Test_v2_Part2_GroundTruth
-  ├── ISIC-2017_Validation_Part1_GroundTruth
-  ├── ISIC-2017_Validation_Part2_GroundTruth
-  └── isic-challenge-2017
-      ├── ISIC2017_Task1-2_Training_Input
-      └── ISIC2017_Task1-2_Training_GroundTruth
+/499B
+  ├── Dataset
+      ├── images
+      ├── masks
 ```
 
 ## Notes
@@ -115,4 +102,4 @@ For any questions or issues, please open an issue on the [GitHub repository](htt
 
 ---
 
-By following this guide, you should be able to set up, train, and evaluate the SAM model on the ISIC 2017 dataset. This modular approach allows for easier maintenance and scalability of the project.
+By following this guide, you should be able to set up, train, and evaluate the SAM model on the PH2 dataset. This modular approach allows for easier maintenance and scalability of the project.
