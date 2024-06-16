@@ -77,7 +77,7 @@ def train_model(dataset, model_path="skin_model_PH2_SAM_checkpoint.pth", num_epo
     torch.save(model.state_dict(), model_path)
 
 if __name__ == "__main__":
-    image_dir = "/content/drive/MyDrive/Dataset/images"
-    mask_dir = "/content/drive/MyDrive/Dataset/masks"
+    image_dir = "./Dataset/images"
+    mask_dir = "./Dataset/masks"
     dataset = load_data(image_dir, mask_dir)
     train_model(dataset)
