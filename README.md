@@ -16,7 +16,7 @@ Before using the scripts, you need to install the necessary dependencies. You ca
 1. Clone the repository:
     ```sh
     git clone -b SAM https://github.com/NahinAlam001/499B.git
-    cd SAM
+    cd 499B
     ```
 
 2. Run the dependency installation script:
