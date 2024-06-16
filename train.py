@@ -40,7 +40,7 @@ class SAMDataset(Dataset):
         inputs["ground_truth_mask"] = ground_truth_mask
         return inputs
 
-def train_model(dataset, model_path="skin_model_ISIC_2017_checkpoint.pth", num_epochs=1, batch_size=2, learning_rate=1e-5):
+def train_model(dataset, model_path="skin_model_PH2_SAM_checkpoint.pth", num_epochs=1, batch_size=2, learning_rate=1e-5):
     processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
     train_dataset = SAMDataset(dataset=dataset, processor=processor)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
@@ -77,7 +77,7 @@ def train_model(dataset, model_path="skin_model_ISIC_2017_checkpoint.pth", num_e
     torch.save(model.state_dict(), model_path)
 
 if __name__ == "__main__":
-    image_dir = "/content/isic-challenge-2017/ISIC2017_Task1-2_Training_Input"
-    mask_dir = "/content/isic-challenge-2017/ISIC2017_Task1-2_Training_GroundTruth"
+    image_dir = "/content/drive/MyDrive/Dataset/images"
+    mask_dir = "/content/drive/MyDrive/Dataset/masks"
     dataset = load_data(image_dir, mask_dir)
     train_model(dataset)
