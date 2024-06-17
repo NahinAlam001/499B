@@ -4,15 +4,24 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader, random_split
+from PIL import Image
 
 # Set paths
-data_dir = './Dataset/ImageFolder'
-save_path = 'densenet_checkpoint.pth'
+data_dir = 'ImageFolder'
+save_path = 'densenet_checkpoint_4.pth'
 
-# Define transformations
+# Custom transform to convert RGBA to RGB and then to tensor
+class RGBAToTensor(transforms.Transform):
+    def __call__(self, img):
+        # Convert RGBA to RGB
+        rgb_image = img.convert('RGB')
+        # Convert RGB image to tensor
+        return transforms.ToTensor()(rgb_image)
+
+# Define transformations (adapted for RGBA images)
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor(),
+    RGBAToTensor(),
 ])
 
 # Load the dataset
@@ -33,6 +42,21 @@ class_names = full_dataset.classes
 
 # Load pre-trained DenseNet model
 model = models.densenet121(pretrained=True)
+
+# Modify the first convolutional layer to accept 4 input channels
+# Extract the weights of the first convolution layer
+conv0_weight = model.features.conv0.weight.data
+# Create a new convolutional layer with 4 input channels
+new_conv0 = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+# Initialize the weights of the new conv0 layer
+with torch.no_grad():
+    new_conv0.weight[:, :3, :, :].copy_(conv0_weight)
+    new_conv0.weight[:, 3:, :, :] = torch.randn_like(new_conv0.weight[:, 3:, :, :])  # Initialize weights for the 4th channel
+
+# Replace the old conv0 with the new one
+model.features.conv0 = new_conv0
+
+# Update the model's classifier
 num_ftrs = model.classifier.in_features
 model.classifier = nn.Linear(num_ftrs, len(class_names))
 
