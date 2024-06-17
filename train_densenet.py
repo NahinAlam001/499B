@@ -1,112 +1,106 @@
 import os
 import torch
-import shutil
-from torch.utils.data import Dataset, DataLoader
-from torchvision import models, transforms
-from torch import nn
-from PIL import Image
-from transformers import SamProcessor, SamModel
-import numpy as np
-from tqdm import tqdm
-from pathlib import Path
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import datasets, transforms, models
+from torch.utils.data import DataLoader, random_split
 
-class SAMClassificationDataset(Dataset):
-    def __init__(self, image_paths, processor, transform=None):
-        self.image_paths = image_paths
-        self.processor = processor
-        self.transform = transform
+# Set paths
+data_dir = './Dataset/ImageFolder'
+save_path = 'densenet_checkpoint.pth'
 
-    def __len__(self):
-        return len(self.image_paths)
+# Define transformations
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+])
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        image = Image.open(image_path).convert("RGB")
+# Load the dataset
+full_dataset = datasets.ImageFolder(data_dir, transform=transform)
 
-        if self.transform:
-            image_transformed = self.transform(image)
+# Split the dataset into training and validation sets
+train_size = int(0.8 * len(full_dataset))
+val_size = len(full_dataset) - train_size
+train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
-        inputs = self.processor(image, return_tensors="pt")
-        pixel_values = inputs["pixel_values"].squeeze(0)
+# Create DataLoaders
+dataloaders = {
+    'train': DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4),
+    'val': DataLoader(val_dataset, batch_size=4, shuffle=True, num_workers=4)
+}
+dataset_sizes = {'train': len(train_dataset), 'val': len(val_dataset)}
+class_names = full_dataset.classes
 
-        return {
-            "image_path": image_path,
-            "image": image_transformed,
-            "pixel_values": pixel_values
-        }
+# Load pre-trained DenseNet model
+model = models.densenet121(pretrained=True)
+num_ftrs = model.classifier.in_features
+model.classifier = nn.Linear(num_ftrs, len(class_names))
 
-def load_image_paths(images_dir):
-    image_paths = []
-    for root, _, files in os.walk(images_dir):
-        for file in files:
-            if file.endswith(('.bmp', '.jpg', '.png')):
-                image_paths.append(os.path.join(root, file))
-    return image_paths
+# Set device
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
 
-def get_segmentations_and_combine(dataset, sam_model, device):
-    combined_images = []
-    image_paths = []
+# Define loss function and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
 
-    for item in tqdm(dataset):
-        pixel_values = item["pixel_values"].to(device).unsqueeze(0)
-        with torch.no_grad():
-            outputs = sam_model(pixel_values=pixel_values)
-        seg_mask = outputs.pred_masks.squeeze().cpu().numpy()
+# Training the model
+num_epochs = 25
+best_model_wts = model.state_dict()
+best_acc = 0.0
 
-        image = item["image"].numpy()
-        combined_image = np.concatenate((image, seg_mask[np.newaxis, ...]), axis=0)
-        combined_images.append(combined_image)
-        image_paths.append(item["image_path"])
+for epoch in range(num_epochs):
+    print(f'Epoch {epoch}/{num_epochs - 1}')
+    print('-' * 10)
 
-    return torch.tensor(combined_images), image_paths
+    # Each epoch has a training and validation phase
+    for phase in ['train', 'val']:
+        if phase == 'train':
+            model.train()  # Set model to training mode
+        else:
+            model.eval()   # Set model to evaluate mode
 
-def classify_images(image_paths, sam_model_path="sam_model_checkpoint.pth", densenet_path="densenet_checkpoint.pth", output_dir="./ImageFolder", batch_size=2):
-    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
+        running_loss = 0.0
+        running_corrects = 0
 
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
+        # Iterate over data
+        for inputs, labels in dataloaders[phase]:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
 
-    dataset = SAMClassificationDataset(image_paths=image_paths, processor=processor, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+            # Zero the parameter gradients
+            optimizer.zero_grad()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+            # Forward
+            with torch.set_grad_enabled(phase == 'train'):
+                outputs = model(inputs)
+                _, preds = torch.max(outputs, 1)
+                loss = criterion(outputs, labels)
 
-    sam_model = SamModel.from_pretrained("facebook/sam-vit-base")
-    sam_model.load_state_dict(torch.load(sam_model_path))
-    sam_model.to(device)
-    sam_model.eval()
+                # Backward + optimize only if in training phase
+                if phase == 'train':
+                    loss.backward()
+                    optimizer.step()
 
-    combined_images, image_paths = get_segmentations_and_combine(dataset, sam_model, device)
+            # Statistics
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
 
-    densenet = models.densenet121(pretrained=False)
-    num_ftrs = densenet.classifier.in_features
-    densenet.classifier = nn.Linear(num_ftrs, len(set(Path(img).parent.stem for img in image_paths)))  # Adjusting for the number of classes
-    densenet.load_state_dict(torch.load(densenet_path))
-    densenet.to(device)
-    densenet.eval()
+        epoch_loss = running_loss / dataset_sizes[phase]
+        epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-    combined_images = combined_images.to(device)
+        print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
 
-    predictions = []
-    with torch.no_grad():
-        outputs = densenet(combined_images)
-        _, preds = torch.max(outputs, 1)
-        predictions.extend(preds.cpu().numpy())
+        # Deep copy the model
+        if phase == 'val' and epoch_acc > best_acc:
+            best_acc = epoch_acc
+            best_model_wts = model.state_dict()
 
-    class_names = sorted(list(set(Path(img).parent.stem for img in image_paths)))
-    for class_name in class_names:
-        os.makedirs(os.path.join(output_dir, class_name), exist_ok=True)
+    print()
 
-    for img_path, pred in zip(image_paths, predictions):
-        class_name = class_names[pred]
-        shutil.copy(img_path, os.path.join(output_dir, class_name))
+print('Best val Acc: {:4f}'.format(best_acc))
 
-    print("Images have been classified and copied to the respective class directories.")
-
-if __name__ == "__main__":
-    image_dir = "./Dataset/images"
-    sam_model_path = "path/to/sam_model_checkpoint.pth"
-    densenet_path = "path/to/densenet_checkpoint.pth"
-    output_dir = "./ImageFolder"
+# Load best model weights
+model.load_state_dict(best_model_wts)
+torch.save(model.state_dict(), save_path)
+print('Model saved to', save_path)
