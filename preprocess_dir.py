@@ -6,7 +6,7 @@ from shutil import copy2
 base_dir = "Dataset"
 images_dir = os.path.join(base_dir, "images")
 csv_file = "data.csv"
-output_dir = os.path.join(base_dir, "ImageFolder")
+output_dir = os.path.join(base_dir, ".." ,"ImageFolder")
 
 # Read the CSV file
 df = pd.read_csv(csv_file)
