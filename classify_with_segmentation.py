@@ -12,6 +12,45 @@ from PIL import Image
 from statistics import mean
 from sklearn.model_selection import train_test_split
 
+class CustomDataset(Dataset):
+    def __init__(self, image_dir, mask_dir, transform=None):
+        self.image_dir = image_dir
+        self.mask_dir = mask_dir
+        self.transform = transform
+        self.image_paths = []
+        self.mask_paths = []
+        
+        for file_name in os.listdir(image_dir):
+            if file_name.endswith('.bmp'):
+                image_path = os.path.join(image_dir, file_name)
+                mask_path = os.path.join(mask_dir, file_name.replace('.bmp', '_lesion.bmp'))
+                if os.path.exists(mask_path):
+                    self.image_paths.append(image_path)
+                    self.mask_paths.append(mask_path)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image_path = self.image_paths[idx]
+        mask_path = self.mask_paths[idx]
+        image = Image.open(image_path).convert("RGB")
+        mask = Image.open(mask_path).convert("L")
+        
+        if self.transform:
+            image = self.transform(image)
+            mask = self.transform(mask)
+        
+        return {"image": image, "label": mask}
+
+def load_data(image_dir, mask_dir):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+    dataset = CustomDataset(image_dir, mask_dir, transform=transform)
+    return dataset
+
 class SAMDataset(Dataset):
     def __init__(self, dataset, processor):
         self.dataset = dataset
@@ -52,7 +91,7 @@ def train_sam_model(dataset, model_path="skin_model_PH2_SAM_checkpoint.pth", num
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
 
-    optimizer = Adam(model.mask_decoder.parameters(), lr=learning_rate, weight_decay=0)
+    optimizer = optim.Adam(model.mask_decoder.parameters(), lr=learning_rate, weight_decay=0)
     seg_loss = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -191,20 +230,19 @@ if __name__ == "__main__":
     mask_dir = './Dataset/masks'
     sam_model_path = "skin_model_PH2_SAM_checkpoint.pth"
     densenet_path = "densenet_checkpoint.pth"
-
     # Load your dataset and train the SAM model
     dataset = load_data(image_dir, mask_dir)
     train_sam_model(dataset, model_path=sam_model_path)
 
     # Load the trained SAM model
-    sam_model = SamModel.from_pretrained("Facebook/sam-vit-base")
+    sam_model = SamModel.from_pretrained("facebook/sam-vit-base")
     sam_model.load_state_dict(torch.load(sam_model_path))
     sam_model.eval()
     sam_model.to("cuda" if torch.cuda.is_available() else "cpu")
-    processor = SamProcessor.from_pretrained("Facebook/sam-vit-base")
+    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
 
     # Load the dataset for classification
-    image_folder = datasets.ImageFolder(image_dir, loader=lambda x: Image.open(x).convert("RGB"))
+    image_folder = datasets.ImageFolder(image_dir, loader=lambda path: Image.open(path).convert('RGB'))
 
     # Train DenseNet model
-    train_multimodal_densenet_model(image_folder, sam_model, processor, densenet_save_path=densenet_path)
+    train_densenet_model(image_folder, sam_model, processor, densenet_save_path=densenet_path)
