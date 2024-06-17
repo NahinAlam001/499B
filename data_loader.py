@@ -4,7 +4,7 @@ from PIL import Image
 from datasets import Dataset
 import random
 
-def load_data(image_dir, mask_dir, image_size=(256, 256)):
+def load_data(image_dir, mask_dir, image_size=(224, 224)):
     images = []
     masks = []
 
