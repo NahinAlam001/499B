@@ -130,9 +130,9 @@ def classify_images(image_paths, sam_model_path, densenet_path, output_dir, batc
     print("Images have been classified and copied to the respective class directories.")
 
 if __name__ == "__main__":
-    image_dir = "Dataset"
-    sam_model_path = "segment.pth"
-    densenet_path = "denseNet.pth"
+    image_dir = "Dataset/ImageFolder"
+    sam_model_path = "skin_model_PH2_SAM_checkpoint.pth"
+    densenet_path = "densenet_checkpoint.pth"
     output_dir = "results"
 
     image_paths = load_image_paths(image_dir)
