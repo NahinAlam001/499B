@@ -1,7 +1,6 @@
 import os
 import csv
 import numpy as np
-from collections import defaultdict
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -48,6 +47,8 @@ def load_data(image_dir, mask_dir, csv_path='data.csv'):
 
 # Function to get bounding box for SAM
 def get_bounding_box(ground_truth_map):
+    if ground_truth_map.ndim == 3:
+        ground_truth_map = ground_truth_map.squeeze(0)  # Ensure it's a 2D array
     y_indices, x_indices = np.where(ground_truth_map > 0)
     x_min, x_max = np.min(x_indices), np.max(x_indices)
     y_min, y_max = np.min(y_indices), np.max(y_indices)
@@ -62,8 +63,7 @@ def get_bounding_box(ground_truth_map):
 # Function to extract features using DenseNet
 def extract_features_densenet(image):
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
+        transforms.ToTensor(),  # Only convert to tensor
     ])
     densenet = models.densenet121(pretrained=True)
     densenet.eval()
@@ -73,9 +73,14 @@ def extract_features_densenet(image):
 
 # Custom Dataset class to integrate SAM and DenseNet features
 class SAMDenseNetDataset(Dataset):
-    def __init__(self, dataset, processor):
+    def __init__(self, dataset, processor, image_size=(256, 256)):
         self.dataset = dataset
         self.processor = processor
+        self.image_size = image_size
+        self.transform = transforms.Compose([
+            transforms.Resize(self.image_size),
+            transforms.ToTensor()
+        ])
 
     def __len__(self):
         return len(self.dataset)
@@ -83,20 +88,29 @@ class SAMDenseNetDataset(Dataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         image = Image.open(item["image"]).convert("RGB")
-        ground_truth_mask = np.array(Image.open(item["label"]).convert("L"))
-        prompt = get_bounding_box(ground_truth_mask)
+        ground_truth_mask = Image.open(item["label"]).convert("L")
+        
+        # Resize image and mask to 256x256
+        image = self.transform(image)
+        ground_truth_mask = self.transform(ground_truth_mask)
+
+        assert image.shape[1:] == ground_truth_mask.shape[1:], "Image and mask sizes do not match"
+
+        # Convert mask back to numpy array for bounding box calculation
+        ground_truth_mask_np = ground_truth_mask.squeeze(0).numpy()
+        prompt = get_bounding_box(ground_truth_mask_np)
         
         # SAM segmentation
         inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
-        inputs["ground_truth_mask"] = torch.tensor(ground_truth_mask, dtype=torch.float32)
+        inputs["ground_truth_mask"] = torch.tensor(ground_truth_mask_np, dtype=torch.float32)
         
         # DenseNet feature extraction
         features = extract_features_densenet(image)
         features = features.squeeze(0)  # Remove batch dimension
         inputs["densenet_features"] = features
         
-        # Prepare labels for classification (assuming binary classification)
+        # Prepare labels for classification
         labels = torch.tensor(class_name_to_label[item["class"]], dtype=torch.long)
         
         return inputs, labels
@@ -110,7 +124,7 @@ def train_model(dataset, model_path="skin_model_PH2_SAM_DenseNet_checkpoint.pth"
 
     model = SamModel.from_pretrained("facebook/sam-vit-base")
     assert isinstance(model, SamModel), "Loaded model is not of type SamModel"
-    for name, param in model.named_parameters():
+    for name, param in model.namedParameters():
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
 
@@ -149,7 +163,7 @@ def train_model(dataset, model_path="skin_model_PH2_SAM_DenseNet_checkpoint.pth"
             cnn_input = cnn_input.reshape(-1, 1024, 7, 7)  # Reshape to match the expected input for SimpleCNN
             
             # Classification using a simple CNN
-            cnn_model = SimpleCNN()
+            cnn_model = SimpleCNN(num_classes=len(class_names))  # Pass number of classes
             cnn_model.to(device)
             cnn_model.train()
             cnn_optimizer = torch.optim.Adam(cnn_model.parameters(), lr=learning_rate)
@@ -168,19 +182,19 @@ def train_model(dataset, model_path="skin_model_PH2_SAM_DenseNet_checkpoint.pth"
             epoch_losses.append(loss.item())
         
         print(f'EPOCH: {epoch}')
-        print(f'Mean loss: {mean(epoch_losses)}')
+        print(f'Mean loss: {np.mean(epoch_losses)}')
 
     torch.save(model.state_dict(), model_path)
 
 # Define a simple CNN model for classification
 class SimpleCNN(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes):
         super(SimpleCNN, self).__init__()
         self.conv1 = torch.nn.Conv2d(1024, 256, kernel_size=3, stride=1, padding=1)  # Adjusted input channels
         self.relu = torch.nn.ReLU()
         self.pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
         self.fc1 = torch.nn.Linear(256 * 3 * 3, 512)  # Adjusted input size for the fully connected layer
-        self.fc2 = torch.nn.Linear(512, len(class_names))  # Output should match number of classes
+        self.fc2 = torch.nn.Linear(512, num_classes)  # Output should match number of classes
 
     def forward(self, x):
         x = self.conv1(x)
@@ -195,6 +209,6 @@ class SimpleCNN(torch.nn.Module):
 if __name__ == "__main__":
     image_dir = "./Dataset/images"
     mask_dir = "./Dataset/masks"
-    csv_path = "data.csv"  # Path to your data.csv file
+    csv_path = "data.csv"
     dataset = load_data(image_dir, mask_dir, csv_path)  # Provide csv_path argument
     train_model(dataset)
