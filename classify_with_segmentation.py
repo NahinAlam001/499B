@@ -1,57 +1,78 @@
 import os
+import csv
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision import datasets, transforms, models
-from transformers import SamProcessor, SamModel
-from monai.losses import DiceCELoss
-from tqdm import tqdm
+from collections import defaultdict
 from PIL import Image
-from statistics import mean
-from sklearn.model_selection import train_test_split
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, models
+from transformers import SamProcessor, SamModel
+from torch.optim import Adam
+import monai
+from tqdm import tqdm
 
-class CustomDataset(Dataset):
-    def __init__(self, image_dir, mask_dir, transform=None):
-        self.image_dir = image_dir
-        self.mask_dir = mask_dir
-        self.transform = transform
-        self.image_paths = []
-        self.mask_paths = []
-        
-        for file_name in os.listdir(image_dir):
-            if file_name.endswith('.bmp'):
-                image_path = os.path.join(image_dir, file_name)
-                mask_path = os.path.join(mask_dir, file_name.replace('.bmp', '_lesion.bmp'))
-                if os.path.exists(mask_path):
-                    self.image_paths.append(image_path)
-                    self.mask_paths.append(mask_path)
+# Define your classes from data.csv
+class_names = ["Common Nevus", "Atypical Nevus", "Melanoma"]
 
-    def __len__(self):
-        return len(self.image_paths)
+class_name_to_label = {class_name: i for i, class_name in enumerate(class_names)}
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        mask_path = self.mask_paths[idx]
-        image = Image.open(image_path).convert("RGB")
-        mask = Image.open(mask_path).convert("L")
-        
-        if self.transform:
-            image = self.transform(image)
-            mask = self.transform(mask)
-        
-        return {"image": image, "label": mask}
+def load_data(image_dir, mask_dir, csv_path='data.csv'):
+    # Load class labels from CSV
+    image_to_class = {}
+    with open(csv_path, mode='r') as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            image_to_class[row['image_id']] = row['dx']
 
-def load_data(image_dir, mask_dir):
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor()
-    ])
-    dataset = CustomDataset(image_dir, mask_dir, transform=transform)
+    # Assuming image and mask directories have corresponding files
+    image_files = os.listdir(image_dir)
+    mask_files = os.listdir(mask_dir)
+
+    dataset = []
+    for image_file in image_files:
+        image_id = os.path.splitext(image_file)[0]  # Extract image ID without extension
+        image_path = os.path.join(image_dir, image_file)
+        mask_file = image_file.replace(".bmp", "_lesion.bmp")  # Adjust for your naming convention
+        mask_path = os.path.join(mask_dir, mask_file)
+
+        if os.path.exists(mask_path) and image_id in image_to_class:
+            dataset.append({
+                "image": image_path,
+                "label": mask_path,
+                "class": image_to_class[image_id]
+            })
+        else:
+            print(f"Mask not found for image: {image_file}")
+
     return dataset
 
-class SAMDataset(Dataset):
+# Function to get bounding box for SAM
+def get_bounding_box(ground_truth_map):
+    y_indices, x_indices = np.where(ground_truth_map > 0)
+    x_min, x_max = np.min(x_indices), np.max(x_indices)
+    y_min, y_max = np.min(y_indices), np.max(y_indices)
+    H, W = ground_truth_map.shape
+    x_min = max(0, x_min - np.random.randint(0, 20))
+    x_max = min(W, x_max + np.random.randint(0, 20))
+    y_min = max(0, y_min - np.random.randint(0, 20))
+    y_max = min(H, y_max + np.random.randint(0, 20))
+    bbox = [x_min, y_min, x_max, y_max]
+    return bbox
+
+# Function to extract features using DenseNet
+def extract_features_densenet(image):
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+    ])
+    densenet = models.densenet121(pretrained=True)
+    densenet.eval()
+    with torch.no_grad():
+        features = densenet.features(transform(image).unsqueeze(0))
+    return features
+
+# Custom Dataset class to integrate SAM and DenseNet features
+class SAMDenseNetDataset(Dataset):
     def __init__(self, dataset, processor):
         self.dataset = dataset
         self.processor = processor
@@ -61,188 +82,119 @@ class SAMDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        image = item["image"]
-        ground_truth_mask = np.array(item["label"])
-        prompt = self.get_bounding_box(ground_truth_mask)
+        image = Image.open(item["image"]).convert("RGB")
+        ground_truth_mask = np.array(Image.open(item["label"]).convert("L"))
+        prompt = get_bounding_box(ground_truth_mask)
+        
+        # SAM segmentation
         inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
-        inputs["ground_truth_mask"] = ground_truth_mask
-        return inputs
+        inputs["ground_truth_mask"] = torch.tensor(ground_truth_mask, dtype=torch.float32)
+        
+        # DenseNet feature extraction
+        features = extract_features_densenet(image)
+        features = features.squeeze(0)  # Remove batch dimension
+        inputs["densenet_features"] = features
+        
+        # Prepare labels for classification (assuming binary classification)
+        labels = torch.tensor(class_name_to_label[item["class"]], dtype=torch.long)
+        
+        return inputs, labels
 
-    def get_bounding_box(self, ground_truth_map):
-        y_indices, x_indices = np.where(ground_truth_map > 0)
-        x_min, x_max = np.min(x_indices), np.max(x_indices)
-        y_min, y_max = np.min(y_indices), np.max(y_indices)
-        H, W = ground_truth_map.shape
-        x_min = max(0, x_min - np.random.randint(0, 20))
-        x_max = min(W, x_max + np.random.randint(0, 20))
-        y_min = max(0, y_min - np.random.randint(0, 20))
-        y_max = min(H, y_max + np.random.randint(0, 20))
-        bbox = [x_min, y_min, x_max, y_max]
-        return bbox
-
-def train_sam_model(dataset, model_path="skin_model_PH2_SAM_checkpoint.pth", num_epochs=1, batch_size=2, learning_rate=1e-5):
+# Function to train the model with SAM and DenseNet integration
+def train_model(dataset, model_path="skin_model_PH2_SAM_DenseNet_checkpoint.pth", num_epochs=1, batch_size=2, learning_rate=1e-5):
+    # SAM setup
     processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
-    train_dataset = SAMDataset(dataset=dataset, processor=processor)
+    train_dataset = SAMDenseNetDataset(dataset=dataset, processor=processor)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 
     model = SamModel.from_pretrained("facebook/sam-vit-base")
+    assert isinstance(model, SamModel), "Loaded model is not of type SamModel"
     for name, param in model.named_parameters():
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
 
-    optimizer = optim.Adam(model.mask_decoder.parameters(), lr=learning_rate, weight_decay=0)
-    seg_loss = DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
+    # Optimizer and loss function setup
+    optimizer = Adam(model.mask_decoder.parameters(), lr=learning_rate, weight_decay=0)
+    seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.train()
 
+    # Count unique classes
+    unique_classes = set()
+    for data in dataset:
+        unique_classes.add(data["class"])
+    
+    print(f"Number of unique classes: {len(unique_classes)}")
+    print(f"Unique classes: {unique_classes}")
+
     for epoch in range(num_epochs):
         epoch_losses = []
         for batch in tqdm(train_dataloader):
+            # SAM segmentation
             outputs = model(pixel_values=batch["pixel_values"].to(device),
                             input_boxes=batch["input_boxes"].to(device),
                             multimask_output=False)
             predicted_masks = outputs.pred_masks.squeeze(1)
-            ground_truth_masks = batch["ground_truth_mask"].float().to(device)
+            ground_truth_masks = batch["ground_truth_mask"].to(device)
             loss = seg_loss(predicted_masks, ground_truth_masks.unsqueeze(1))
+            
+            # DenseNet features
+            densenet_features = batch["densenet_features"].to(device)
+            
+            # Prepare input for CNN
+            cnn_input = densenet_features.permute(0, 2, 3, 1)  # Adjust dimensions for Conv2D
+            cnn_input = cnn_input.reshape(-1, 1024, 7, 7)  # Reshape to match the expected input for SimpleCNN
+            
+            # Classification using a simple CNN
+            cnn_model = SimpleCNN()
+            cnn_model.to(device)
+            cnn_model.train()
+            cnn_optimizer = torch.optim.Adam(cnn_model.parameters(), lr=learning_rate)
+            cnn_criterion = torch.nn.CrossEntropyLoss()
+            
+            cnn_optimizer.zero_grad()
+            cnn_output = cnn_model(cnn_input)
+            cnn_loss = cnn_criterion(cnn_output, batch["labels"].to(device))
+            cnn_loss.backward()
+            cnn_optimizer.step()
+            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
             epoch_losses.append(loss.item())
+        
         print(f'EPOCH: {epoch}')
         print(f'Mean loss: {mean(epoch_losses)}')
 
     torch.save(model.state_dict(), model_path)
-    print('SAM Model saved to', model_path)
 
-class CombinedDataset(Dataset):
-    def __init__(self, image_folder, sam_model, processor, transform):
-        self.image_folder = image_folder
-        self.sam_model = sam_model
-        self.processor = processor
-        self.transform = transform
-        self.classes = image_folder.classes
-        self.samples = image_folder.samples
+# Define a simple CNN model for classification
+class SimpleCNN(torch.nn.Module):
+    def __init__(self):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = torch.nn.Conv2d(1024, 256, kernel_size=3, stride=1, padding=1)  # Adjusted input channels
+        self.relu = torch.nn.ReLU()
+        self.pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+        self.fc1 = torch.nn.Linear(256 * 3 * 3, 512)  # Adjusted input size for the fully connected layer
+        self.fc2 = torch.nn.Linear(512, len(class_names))  # Output should match number of classes
 
-    def __len__(self):
-        return len(self.samples)
-
-    def __getitem__(self, idx):
-        path, label = self.samples[idx]
-        image = Image.open(path).convert("RGB")
-        image_tensor = self.transform(image)
-
-        inputs = self.processor(images=image, return_tensors="pt")
-        inputs = {k: v.to(self.sam_model.device) for k, v in inputs.items()}
-        with torch.no_grad():
-            outputs = self.sam_model(**inputs, multimask_output=False)
-        mask = outputs.pred_masks[0].cpu().numpy()
-        mask_image = Image.fromarray((mask * 255).astype(np.uint8)).resize(image.size)
-        mask_tensor = self.transform(mask_image)
-
-        combined = torch.cat([image_tensor, mask_tensor], dim=0)
-        return combined, label
-
-def train_densenet_model(image_folder, sam_model, processor, densenet_save_path="densenet_checkpoint.pth", num_epochs=25, batch_size=4, learning_rate=0.001):
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-    ])
-
-    combined_dataset = CombinedDataset(image_folder, sam_model, processor, transform)
-
-    train_size = int(0.8 * len(combined_dataset))
-    val_size = len(combined_dataset) - train_size
-    train_dataset, val_dataset = random_split(combined_dataset, [train_size, val_size])
-
-    dataloaders = {
-        'train': DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4),
-        'val': DataLoader(val_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
-    }
-    dataset_sizes = {'train': len(train_dataset), 'val': len(val_dataset)}
-    class_names = combined_dataset.classes
-
-    model = models.densenet121(pretrained=True)
-    num_ftrs = model.classifier.in_features
-    model.classifier = nn.Linear(num_ftrs, len(class_names))
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
-
-    best_model_wts = model.state_dict()
-    best_acc = 0.0
-
-    for epoch in range(num_epochs):
-        print(f'Epoch {epoch}/{num_epochs - 1}')
-        print('-' * 10)
-
-        for phase in ['train', 'val']:
-            if phase == 'train':
-                model.train()
-            else:
-                model.eval()
-
-            running_loss = 0.0
-            running_corrects = 0
-
-            for inputs, labels in dataloaders[phase]:
-                inputs = inputs.to(device)
-                labels = labels.to(device)
-
-                optimizer.zero_grad()
-
-                with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs)
-                    _, preds = torch.max(outputs, 1)
-                    loss = criterion(outputs, labels)
-
-                    if phase == 'train':
-                        loss.backward()
-                        optimizer.step()
-
-                running_loss += loss.item() * inputs.size(0)
-                running_corrects += torch.sum(preds == labels.data)
-
-            epoch_loss = running_loss / dataset_sizes[phase]
-            epoch_acc = running_corrects.double() / dataset_sizes[phase]
-
-            print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
-
-            if phase == 'val' and epoch_acc > best_acc:
-                best_acc = epoch_acc
-                best_model_wts = model.state_dict()
-
-        print()
-
-    print('Best val Acc: {:4f}'.format(best_acc))
-
-    model.load_state_dict(best_model_wts)
-    torch.save(model.state_dict(), densenet_save_path)
-    print('DenseNet Model saved to', densenet_save_path)
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)  # Flatten the tensor for fully connected layers
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
 
 if __name__ == "__main__":
-    image_dir = './ImageFolder'
-    mask_dir = './Dataset/masks'
-    sam_model_path = "skin_model_PH2_SAM_checkpoint.pth"
-    densenet_path = "densenet_checkpoint.pth"
-    # Load your dataset and train the SAM model
-    dataset = load_data(image_dir, mask_dir)
-    train_sam_model(dataset, model_path=sam_model_path)
-
-    # Load the trained SAM model
-    sam_model = SamModel.from_pretrained("facebook/sam-vit-base")
-    sam_model.load_state_dict(torch.load(sam_model_path))
-    sam_model.eval()
-    sam_model.to("cuda" if torch.cuda.is_available() else "cpu")
-    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
-
-    # Load the dataset for classification
-    image_folder = datasets.ImageFolder(image_dir, loader=lambda path: Image.open(path).convert('RGB'))
-
-    # Train DenseNet model
-    train_densenet_model(image_folder, sam_model, processor, densenet_save_path=densenet_path)
+    image_dir = "./Dataset/images"
+    mask_dir = "./Dataset/masks"
+    csv_path = "data.csv"  # Path to your data.csv file
+    dataset = load_data(image_dir, mask_dir, csv_path)  # Provide csv_path argument
+    train_model(dataset)
