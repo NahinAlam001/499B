@@ -1,214 +1,212 @@
 import os
-import csv
 import numpy as np
-from PIL import Image
+import pandas as pd
+import cv2
 import torch
+import torch.nn as nn
+import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
-from transformers import SamProcessor, SamModel
-from torch.optim import Adam
-import monai
 from tqdm import tqdm
+from statistics import mean
+from transformers import SamProcessor, SamModel, SamImageProcessor
 
-# Define your classes from data.csv
-class_names = ["Common Nevus", "Atypical Nevus", "Melanoma"]
+# Paths
+images_dir = "/content/Dataset/images"
+masks_dir = "/content/Dataset/masks"
+csv_file = "data.csv"
+checkpoint_dir = "/content/checkpoints"
 
-class_name_to_label = {class_name: i for i, class_name in enumerate(class_names)}
+# Create checkpoint directory if it doesn't exist
+os.makedirs(checkpoint_dir, exist_ok=True)
 
-def load_data(image_dir, mask_dir, csv_path='data.csv'):
-    # Load class labels from CSV
-    image_to_class = {}
-    with open(csv_path, mode='r') as csv_file:
-        reader = csv.DictReader(csv_file)
-        for row in reader:
-            image_to_class[row['image_id']] = row['dx']
+# Read the CSV to determine number of classes
+data = pd.read_csv(csv_file)
+num_classes = len(data['dx'].unique())
 
-    # Assuming image and mask directories have corresponding files
-    image_files = os.listdir(image_dir)
-    mask_files = os.listdir(mask_dir)
+# Hyperparameters
+batch_size = 4
+learning_rate = 0.001
+num_epochs = 100
+accumulation_steps = 4
 
-    dataset = []
-    for image_file in image_files:
-        image_id = os.path.splitext(image_file)[0]  # Extract image ID without extension
-        image_path = os.path.join(image_dir, image_file)
-        mask_file = image_file.replace(".bmp", "_lesion.bmp")  # Adjust for your naming convention
-        mask_path = os.path.join(mask_dir, mask_file)
+# Data transformations
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.ToTensor()
+])
 
-        if os.path.exists(mask_path) and image_id in image_to_class:
-            dataset.append({
-                "image": image_path,
-                "label": mask_path,
-                "class": image_to_class[image_id]
-            })
-        else:
-            print(f"Mask not found for image: {image_file}")
-
-    return dataset
-
-# Function to get bounding box for SAM
+# Utility function to get bounding box
 def get_bounding_box(ground_truth_map):
-    if ground_truth_map.ndim == 3:
-        ground_truth_map = ground_truth_map.squeeze(0)  # Ensure it's a 2D array
     y_indices, x_indices = np.where(ground_truth_map > 0)
-    x_min, x_max = np.min(x_indices), np.max(x_indices)
-    y_min, y_max = np.min(y_indices), np.max(y_indices)
-    H, W = ground_truth_map.shape
+    if len(y_indices) == 0 or len(x_indices) == 0:
+        x_min, x_max, y_min, y_max = 0, 0, 0, 0
+    else:
+        x_min, x_max = np.min(x_indices), np.max(x_indices)
+        y_min, y_max = np.min(y_indices), np.max(y_indices)
+        H, W = ground_truth_map.shape
     x_min = max(0, x_min - np.random.randint(0, 20))
     x_max = min(W, x_max + np.random.randint(0, 20))
     y_min = max(0, y_min - np.random.randint(0, 20))
     y_max = min(H, y_max + np.random.randint(0, 20))
-    bbox = [x_min, y_min, x_max, y_max]
-    return bbox
+    return [x_min, y_min, x_max, y_max]
 
-# Function to extract features using DenseNet
-def extract_features_densenet(image):
-    transform = transforms.Compose([
-        transforms.ToTensor(),  # Only convert to tensor
-    ])
-    densenet = models.densenet121(pretrained=True)
-    densenet.eval()
-    with torch.no_grad():
-        features = densenet.features(transform(image).unsqueeze(0))
-    return features
+# Custom dataset
+class CustomImageItemDataset(Dataset):
+    def __init__(self, images_dir, masks_dir, csv_file, transform=None, target_size=(256, 256)):
+        self.images_dir = images_dir
+        self.masks_dir = masks_dir
+        self.data = pd.read_csv(csv_file)
+        self.transform = transform
+        self.target_size = target_size
+        unique_labels = self.data['dx'].unique()
+        self.label_map = {label: idx for idx, label in enumerate(unique_labels)}
 
-# Custom Dataset class to integrate SAM and DenseNet features
-class SAMDenseNetDataset(Dataset):
-    def __init__(self, dataset, processor, image_size=(256, 256)):
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.images_dir, f"{self.data.iloc[idx, 0]}.bmp")
+        mask_name = os.path.join(self.masks_dir, f"{self.data.iloc[idx, 0]}_lesion.bmp")
+        if not os.path.isfile(img_name) or not os.path.isfile(mask_name):
+            raise ValueError(f"Image or mask file not found for index {idx}")
+        image = cv2.imread(img_name)
+        mask = cv2.imread(mask_name, cv2.IMREAD_GRAYSCALE)
+
+        if image is None:
+            raise ValueError(f"Error loading image at {img_name}")
+        if mask is None:
+            raise ValueError(f"Error loading mask at {mask_name}")
+
+        image = cv2.resize(image, self.target_size, interpolation=cv2.INTER_NEAREST)
+        mask = cv2.resize(mask, self.target_size, interpolation=cv2.INTER_NEAREST)
+        _, mask = cv2.threshold(mask, 128, 255, cv2.THRESH_BINARY)
+        label_str = self.data.iloc[idx, 1]
+        if label_str not in self.label_map:
+            raise ValueError(f"Unknown label: {label_str}")
+
+        label = self.label_map[label_str]
+        label = torch.tensor(label, dtype=torch.long)
+        if self.transform:
+            image = self.transform(image)
+            mask = self.transform(mask)
+        return {"image": image, "mask": mask, "label": label, "mask_name": mask_name}
+
+# SAM Dataset
+class SAMDataset(Dataset):
+    def __init__(self, dataset, processor, transform=None):
         self.dataset = dataset
         self.processor = processor
-        self.image_size = image_size
-        self.transform = transforms.Compose([
-            transforms.Resize(self.image_size),
-            transforms.ToTensor()
-        ])
+        self.transform = transform
 
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        image = Image.open(item["image"]).convert("RGB")
-        ground_truth_mask = Image.open(item["label"]).convert("L")
-        
-        # Resize image and mask to 256x256
-        image = self.transform(image)
-        ground_truth_mask = self.transform(ground_truth_mask)
+        image = item["image"]
+        mask_name = item["mask_name"]
+        ground_truth_mask = cv2.imread(mask_name, cv2.IMREAD_GRAYSCALE)
 
-        assert image.shape[1:] == ground_truth_mask.shape[1:], "Image and mask sizes do not match"
+        if ground_truth_mask is None:
+            raise ValueError(f"Error loading mask at {mask_name}")
 
-        # Convert mask back to numpy array for bounding box calculation
-        ground_truth_mask_np = ground_truth_mask.squeeze(0).numpy()
-        prompt = get_bounding_box(ground_truth_mask_np)
-        
-        # SAM segmentation
-        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
+        ground_truth_mask = cv2.resize(ground_truth_mask, (image.shape[2], image.shape[1]), interpolation=cv2.INTER_NEAREST)
+        if self.transform:
+            ground_truth_mask = self.transform(ground_truth_mask)
+
+        ground_truth_mask = torch.tensor(ground_truth_mask, dtype=torch.float32).unsqueeze(0)
+        prompt = get_bounding_box(ground_truth_mask.numpy().squeeze())
+        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt", do_rescale=False)
         inputs = {k: v.squeeze(0) for k, v in inputs.items()}
-        inputs["ground_truth_mask"] = torch.tensor(ground_truth_mask_np, dtype=torch.float32)
-        
-        # DenseNet feature extraction
-        features = extract_features_densenet(image)
-        features = features.squeeze(0)  # Remove batch dimension
-        inputs["densenet_features"] = features
-        
-        # Prepare labels for classification
-        labels = torch.tensor(class_name_to_label[item["class"]], dtype=torch.long)
-        
-        return inputs, labels
+        inputs["ground_truth_mask"] = ground_truth_mask
+        inputs["label"] = item["label"]
+        return inputs
 
-# Function to train the model with SAM and DenseNet integration
-def train_model(dataset, model_path="skin_model_PH2_SAM_DenseNet_checkpoint.pth", num_epochs=1, batch_size=2, learning_rate=1e-5):
-    # SAM setup
-    processor = SamProcessor.from_pretrained("facebook/sam-vit-base")
-    train_dataset = SAMDenseNetDataset(dataset=dataset, processor=processor)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-
-    model = SamModel.from_pretrained("facebook/sam-vit-base")
-    assert isinstance(model, SamModel), "Loaded model is not of type SamModel"
-    for name, param in model.namedParameters():
-        if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
-            param.requires_grad_(False)
-
-    # Optimizer and loss function setup
-    optimizer = Adam(model.mask_decoder.parameters(), lr=learning_rate, weight_decay=0)
-    seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-    model.train()
-
-    # Count unique classes
-    unique_classes = set()
-    for data in dataset:
-        unique_classes.add(data["class"])
-    
-    print(f"Number of unique classes: {len(unique_classes)}")
-    print(f"Unique classes: {unique_classes}")
-
-    for epoch in range(num_epochs):
-        epoch_losses = []
-        for batch in tqdm(train_dataloader):
-            # SAM segmentation
-            outputs = model(pixel_values=batch["pixel_values"].to(device),
-                            input_boxes=batch["input_boxes"].to(device),
-                            multimask_output=False)
-            predicted_masks = outputs.pred_masks.squeeze(1)
-            ground_truth_masks = batch["ground_truth_mask"].to(device)
-            loss = seg_loss(predicted_masks, ground_truth_masks.unsqueeze(1))
-            
-            # DenseNet features
-            densenet_features = batch["densenet_features"].to(device)
-            
-            # Prepare input for CNN
-            cnn_input = densenet_features.permute(0, 2, 3, 1)  # Adjust dimensions for Conv2D
-            cnn_input = cnn_input.reshape(-1, 1024, 7, 7)  # Reshape to match the expected input for SimpleCNN
-            
-            # Classification using a simple CNN
-            cnn_model = SimpleCNN(num_classes=len(class_names))  # Pass number of classes
-            cnn_model.to(device)
-            cnn_model.train()
-            cnn_optimizer = torch.optim.Adam(cnn_model.parameters(), lr=learning_rate)
-            cnn_criterion = torch.nn.CrossEntropyLoss()
-            
-            cnn_optimizer.zero_grad()
-            cnn_output = cnn_model(cnn_input)
-            cnn_loss = cnn_criterion(cnn_output, batch["labels"].to(device))
-            cnn_loss.backward()
-            cnn_optimizer.step()
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            epoch_losses.append(loss.item())
-        
-        print(f'EPOCH: {epoch}')
-        print(f'Mean loss: {np.mean(epoch_losses)}')
-
-    torch.save(model.state_dict(), model_path)
-
-# Define a simple CNN model for classification
-class SimpleCNN(torch.nn.Module):
+# Model definition
+class DenseNetClassifier(nn.Module):
     def __init__(self, num_classes):
-        super(SimpleCNN, self).__init__()
-        self.conv1 = torch.nn.Conv2d(1024, 256, kernel_size=3, stride=1, padding=1)  # Adjusted input channels
-        self.relu = torch.nn.ReLU()
-        self.pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
-        self.fc1 = torch.nn.Linear(256 * 3 * 3, 512)  # Adjusted input size for the fully connected layer
-        self.fc2 = torch.nn.Linear(512, num_classes)  # Output should match number of classes
+        super(DenseNetClassifier, self).__init__()
+        self.densenet = models.densenet121(weights="IMAGENET1K_V1")
+        self.densenet.features.conv0 = nn.Conv2d(6, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.densenet.classifier = nn.Linear(self.densenet.classifier.in_features, num_classes)
 
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.relu(x)
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)  # Flatten the tensor for fully connected layers
-        x = self.fc1(x)
-        x = self.relu(x)
-        x = self.fc2(x)
+        x = self.densenet(x)
         return x
 
 if __name__ == "__main__":
-    image_dir = "./Dataset/images"
-    mask_dir = "./Dataset/masks"
-    csv_path = "data.csv"
-    dataset = load_data(image_dir, mask_dir, csv_path)  # Provide csv_path argument
-    train_model(dataset)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    image_processor = SamImageProcessor()
+    processor = SamProcessor(image_processor)
+    sam_model = SamModel.from_pretrained("facebook/sam-vit-base")
+    sam_model = sam_model.to(device)
+    dataset = CustomImageItemDataset(images_dir, masks_dir, csv_file, transform=transform)
+    train_dataset = SAMDataset(dataset=dataset, processor=processor)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False, pin_memory=True, num_workers=2)
+    classifier = DenseNetClassifier(num_classes=num_classes)
+    classifier = classifier.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(classifier.parameters(), lr=learning_rate)
+    scaler = torch.cuda.amp.GradScaler()  # For mixed precision training
+
+    start_epoch = 0
+
+    # Load checkpoint if available
+    checkpoint_path = os.path.join(checkpoint_dir, "checkpoint.pth")
+    if os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        classifier.load_state_dict(checkpoint['classifier_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Loaded checkpoint from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, num_epochs):
+        epoch_losses = []
+        classifier.train()
+        sam_model.eval()  # Ensure SAM model is in evaluation mode
+        for i, batch in enumerate(tqdm(train_loader)):
+            images = batch["pixel_values"].to(device)
+            labels = batch["label"].to(device)
+            optimizer.zero_grad()
+            with torch.no_grad():
+                sam_output = sam_model(images, input_boxes=None)
+                pred_masks = sam_output["pred_masks"]  # Extract predicted masks
+
+                # Squeeze the unnecessary dimension
+                pred_masks = pred_masks.squeeze(1)  # Now shape is [batch_size, num_predictions, height, width]
+
+                # Combine masks across channels
+                pred_masks = pred_masks.permute(0, 2, 3, 1).reshape(pred_masks.shape[0], pred_masks.shape[2], pred_masks.shape[3], -1)
+
+                pred_masks = pred_masks.permute(0, 3, 1, 2)  # Permute to match [batch_size, channels, height, width]
+                pred_masks = pred_masks[:, :3, :, :]  # Select the first 3 channels
+
+                # Resize pred_masks to match images dimensions
+                pred_masks = torch.nn.functional.interpolate(pred_masks, size=(images.shape[2], images.shape[3]), mode='bilinear')
+
+                combined_input = torch.cat((images, pred_masks), dim=1)  # Combine images and masks
+
+            with torch.cuda.amp.autocast():
+                outputs = classifier(combined_input)
+                loss = criterion(outputs, labels)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+
+            epoch_losses.append(loss.item())
+
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {mean(epoch_losses)}")
+
+        # Save checkpoint every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            checkpoint = {
+                'epoch': epoch,
+                'classifier_state_dict': classifier.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict()
+}
+torch.save(checkpoint, checkpoint_path)
+print(f"Checkpoint saved at epoch {epoch + 1}")
