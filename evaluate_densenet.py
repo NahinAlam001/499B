@@ -9,6 +9,9 @@ from torchvision import transforms, models
 from transformers import SamProcessor, SamModel, SamImageProcessor
 from tqdm import tqdm
 from statistics import mean
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # Paths
 images_dir = "/content/Dataset/images"
@@ -110,6 +113,20 @@ class DenseNetClassifier(nn.Module):
         x = self.densenet(x)
         return x
 
+def plot_confusion_matrix(cm, class_names):
+    """
+    Plot a confusion matrix heatmap.
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False,
+                xticklabels=class_names, yticklabels=class_names, ax=ax)
+    ax.set_xlabel('Predicted labels')
+    ax.set_ylabel('True labels')
+    ax.set_title('Confusion Matrix')
+    plt.yticks(rotation=0)
+    plt.xticks(rotation=45)
+    plt.show()
+
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     image_processor = SamImageProcessor()
@@ -124,13 +141,13 @@ if __name__ == "__main__":
     classifier = DenseNetClassifier(num_classes=num_classes)
     classifier = classifier.to(device)
     checkpoint = torch.load(checkpoint_path)
-    
+
     # Modify checkpoint to adapt to current model
     classifier_dict = classifier.state_dict()
     pretrained_dict = {k: v for k, v in checkpoint['classifier_state_dict'].items() if k in classifier_dict}
     classifier_dict.update(pretrained_dict)
     classifier.load_state_dict(classifier_dict)
-    
+
     classifier.eval()  # Set model to evaluation mode
 
     criterion = nn.CrossEntropyLoss()
@@ -168,4 +185,11 @@ if __name__ == "__main__":
     accuracy = np.mean(np.array(all_predictions) == np.array(all_labels))
     print(f"Accuracy: {accuracy}")
 
-    # Additional evaluation metrics or visualization can be added here
+    # Calculate precision, recall, F1 score
+    precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_predictions, average='weighted')
+    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1 Score: {f1:.4f}")
+
+    # Create confusion matrix
+    class_names = data['dx'].unique()
+    cm = confusion_matrix(all_labels, all_predictions)
+    plot_confusion_matrix(cm, class_names)
