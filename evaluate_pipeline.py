@@ -6,25 +6,27 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from transformers import SamProcessor, SamModel, SamImageProcessor
+from tqdm import tqdm
+from statistics import mean
 
-# Define paths
-images_dir = "/content/Dataset/images"  
-masks_dir = "/content/Dataset/masks"   
-csv_file = "data.csv"                  
-checkpoint_file = "classification.pth"  
+# Paths
+images_dir = "/content/Dataset/images"
+masks_dir = "/content/Dataset/masks"
+csv_file = "data.csv"
+checkpoint_path = "/content/drive/MyDrive/499B/checkpoint.pth"  # Adjust path to your checkpoint
 
-# Hyperparameters and constants
-batch_size = 4
-target_size = (256, 256)
+# Read the CSV to determine number of classes
+data = pd.read_csv(csv_file)
+num_classes = len(data['dx'].unique())
 
-# Data transformations (similar to training)
+# Data transformations
 transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.ToTensor()
 ])
 
-# Custom dataset class (similar to training)
+# Custom dataset for evaluation
 class CustomImageItemDataset(Dataset):
     def __init__(self, images_dir, masks_dir, csv_file, transform=None, target_size=(256, 256)):
         self.images_dir = images_dir
@@ -65,11 +67,42 @@ class CustomImageItemDataset(Dataset):
             mask = self.transform(mask)
         return {"image": image, "mask": mask, "label": label, "mask_name": mask_name}
 
-# Model definition (same as training)
+# SAM Dataset for evaluation
+class SAMDataset(Dataset):
+    def __init__(self, dataset, processor, transform=None):
+        self.dataset = dataset
+        self.processor = processor
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        image = item["image"]
+        mask_name = item["mask_name"]
+        ground_truth_mask = cv2.imread(mask_name, cv2.IMREAD_GRAYSCALE)
+
+        if ground_truth_mask is None:
+            raise ValueError(f"Error loading mask at {mask_name}")
+
+        ground_truth_mask = cv2.resize(ground_truth_mask, (image.shape[2], image.shape[1]), interpolation=cv2.INTER_NEAREST)
+        if self.transform:
+            ground_truth_mask = self.transform(ground_truth_mask)
+
+        ground_truth_mask = torch.tensor(ground_truth_mask, dtype=torch.float32).unsqueeze(0)
+        prompt = get_bounding_box(ground_truth_mask.numpy().squeeze())
+        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt", do_rescale=False)
+        inputs = {k: v.squeeze(0) for k, v in inputs.items()}
+        inputs["ground_truth_mask"] = ground_truth_mask
+        inputs["label"] = item["label"]
+        return inputs
+
+# Model definition
 class DenseNetClassifier(nn.Module):
     def __init__(self, num_classes):
         super(DenseNetClassifier, self).__init__()
-        self.densenet = models.densenet121(pretrained=True)
+        self.densenet = models.densenet121(pretrained=False)
         self.densenet.features.conv0 = nn.Conv2d(6, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.densenet.classifier = nn.Linear(self.densenet.classifier.in_features, num_classes)
 
@@ -79,35 +112,60 @@ class DenseNetClassifier(nn.Module):
 
 if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    image_processor = SamImageProcessor()
+    processor = SamProcessor(image_processor)
+    sam_model = SamModel.from_pretrained("Facebook/sam-vit-base")
+    sam_model = sam_model.to(device)
     dataset = CustomImageItemDataset(images_dir, masks_dir, csv_file, transform=transform)
-    eval_loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=2)
+    eval_dataset = SAMDataset(dataset=dataset, processor=processor, transform=transform)
+    eval_loader = DataLoader(eval_dataset, batch_size=4, shuffle=False, num_workers=2)
 
-    # Load trained model
-    model = DenseNetClassifier(num_classes=len(dataset.label_map))
-    model = model.to(device)
-    checkpoint = torch.load(checkpoint_file, map_location=device)
-    model.load_state_dict(checkpoint['classifier_state_dict'])
+    # Initialize model and load checkpoint
+    classifier = DenseNetClassifier(num_classes=num_classes)
+    classifier = classifier.to(device)
+    checkpoint = torch.load(checkpoint_path)
+    
+    # Modify checkpoint to adapt to current model
+    classifier_dict = classifier.state_dict()
+    pretrained_dict = {k: v for k, v in checkpoint['classifier_state_dict'].items() if k in classifier_dict}
+    classifier_dict.update(pretrained_dict)
+    classifier.load_state_dict(classifier_dict)
+    
+    classifier.eval()  # Set model to evaluation mode
 
-    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    all_predictions = []
     all_labels = []
-    all_preds = []
 
     with torch.no_grad():
-        for batch in eval_loader:
-            images = batch["image"].to(device)
-            labels = batch["label"].cpu().numpy()
+        for batch in tqdm(eval_loader):
+            images = batch["pixel_values"].to(device)
+            labels = batch["label"].to(device)
 
-            outputs = model(images)
-            _, preds = torch.max(outputs, 1)
-            preds = preds.cpu().numpy()
+            sam_output = sam_model(images, input_boxes=None)
+            pred_masks = sam_output["pred_masks"]  # Extract predicted masks
 
-            all_labels.extend(labels)
-            all_preds.extend(preds)
+            # Squeeze the unnecessary dimension
+            pred_masks = pred_masks.squeeze(1)  # Now shape is [batch_size, num_predictions, height, width]
+
+            # Combine masks across channels
+            pred_masks = pred_masks.permute(0, 2, 3, 1).reshape(pred_masks.shape[0], pred_masks.shape[2], pred_masks.shape[3], -1)
+            pred_masks = pred_masks.permute(0, 3, 1, 2)  # Permute to match [batch_size, channels, height, width]
+            pred_masks = pred_masks[:, :3, :, :]  # Select the first 3 channels
+
+            # Resize pred_masks to match images dimensions
+            pred_masks = torch.nn.functional.interpolate(pred_masks, size=(images.shape[2], images.shape[3]), mode='bilinear')
+
+            combined_input = torch.cat((images, pred_masks), dim=1)  # Combine images and masks
+
+            outputs = classifier(combined_input)
+            _, predicted = torch.max(outputs, 1)
+
+            all_predictions.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
     # Calculate evaluation metrics
-    accuracy = accuracy_score(all_labels, all_preds)
-    precision = precision_score(all_labels, all_preds, average='macro')
-    recall = recall_score(all_labels, all_preds, average='macro')
-    f1 = f1_score(all_labels, all_preds, average='macro')
+    accuracy = np.mean(np.array(all_predictions) == np.array(all_labels))
+    print(f"Accuracy: {accuracy}")
 
-    print(f"Accuracy: {accuracy:.4f}, Precision: {precision:.4f}, Recall: {recall:.4f}, F1-score: {f1:.4f}")
+    # Additional evaluation metrics or visualization can be added here
