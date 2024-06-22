@@ -1,0 +1,20 @@
+{% extends "layout.html" %} {% block content %}
+<div class="jumbotron mt-4">
+    <h1 class="display-4">Welcome to SamNet</h1>
+    <p class="lead">Upload an image and get predictions for its class.</p>
+    <hr class="my-4" />
+    <form action="/" method="post" enctype="multipart/form-data">
+        <div class="form-group">
+            <label for="file">Select an image to upload</label>
+            <input
+                type="file"
+                class="form-control-file"
+                id="file"
+                name="file"
+                required
+            />
+        </div>
+        <button type="submit" class="btn btn-primary mt-2">Upload</button>
+    </form>
+</div>
+{% endblock %}

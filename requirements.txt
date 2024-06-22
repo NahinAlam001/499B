@@ -1,0 +1,8 @@
+Flask
+numpy
+pandas
+opencv-python-headless
+torch
+torchvision
+transformers
+tqdm
